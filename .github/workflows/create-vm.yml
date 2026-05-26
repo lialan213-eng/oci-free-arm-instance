@@ -1,0 +1,96 @@
+name: Try to Create OCI VM
+
+on:
+  # Run every 10 minutes, but only between 11:00 AM and 2:00 AM Beijing time (CST, UTC+8).
+  # 11:00 AM CST = 03:00 UTC   |   2:00 AM CST (next day) = 18:00 UTC
+  schedule:
+    - cron: '*/10 3-17 * * *'   # Every 10 min from 03:00–17:59 UTC (11:00 AM–1:59 AM CST)
+    - cron: '0 18 * * *'         # Once at 18:00 UTC (exactly 2:00 AM CST)
+  # Allow manual triggering from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  create-instance:
+    name: Attempt OCI VM Creation
+    runs-on: ubuntu-latest
+    permissions: {}  # This job needs no GitHub token permissions
+
+    steps:
+      - name: Cache OCI CLI
+        id: cache-oci
+        uses: actions/cache@v4
+        with:
+          path: ~/.local
+          key: oci-cli-${{ runner.os }}-v1
+
+      - name: Install OCI CLI
+        if: steps.cache-oci.outputs.cache-hit != 'true'
+        run: |
+          pip install --user oci-cli --quiet
+
+      - name: Ensure OCI CLI is on PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_CLI_USER }}
+          fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}
+          key_file=/home/runner/.oci/oci_api_key.pem
+          tenancy=${{ secrets.OCI_CLI_TENANCY }}
+          region=${{ secrets.OCI_CLI_REGION }}
+          EOF
+          chmod 600 ~/.oci/config
+
+      - name: Write SSH public key
+        run: |
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh_key.pub
+
+      - name: Try to create VM instance
+        id: create_vm
+        run: |
+          set +e
+          OUTPUT=$(oci compute instance launch \
+            --compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}" \
+            --availability-domain "${{ secrets.AD_NAME }}" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
+            --image-id "${{ secrets.IMAGE_ID }}" \
+            --ssh-authorized-keys-file /tmp/ssh_key.pub \
+            --display-name "coolify-vm" \
+            --boot-volume-size-in-gbs 100 \
+            2>&1)
+          EXIT_CODE=$?
+          echo "output<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$OUTPUT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Discord on success
+        if: steps.create_vm.outputs.exit_code == '0'
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg content "✅ **OCI VM Created Successfully!**\n\`\`\`\n${{ steps.create_vm.outputs.output }}\n\`\`\`" \
+            '{content: $content}')
+          curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+
+      - name: Notify Discord on failure
+        if: steps.create_vm.outputs.exit_code != '0'
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg content "❌ **OCI VM Creation Failed** (attempt at $(date -u '+%Y-%m-%d %H:%M UTC'))\n\`\`\`\n${{ steps.create_vm.outputs.output }}\n\`\`\`" \
+            '{content: $content}')
+          curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+
+      - name: Fail the job if VM creation failed
+        if: steps.create_vm.outputs.exit_code != '0'
+        run: exit 1
