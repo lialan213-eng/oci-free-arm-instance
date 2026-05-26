@@ -73,23 +73,33 @@ jobs:
 
       - name: Notify Discord on success
         if: steps.create_vm.outputs.exit_code == '0'
+        env:
+          OCI_OUTPUT: ${{ steps.create_vm.outputs.output }}
         run: |
-          PAYLOAD=$(jq -n \
-            --arg content "✅ **OCI VM Created Successfully!**\n\`\`\`\n${{ steps.create_vm.outputs.output }}\n\`\`\`" \
-            '{content: $content}')
-          curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+          python3 -c "
+import json, os
+output = os.environ.get('OCI_OUTPUT', '')
+content = '\u2705 **OCI VM Created Successfully!**\n\`\`\`\n' + output + '\n\`\`\`'
+print(json.dumps({'content': content}))
+" | curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d @-
 
       - name: Notify Discord on failure
         if: steps.create_vm.outputs.exit_code != '0'
+        env:
+          OCI_OUTPUT: ${{ steps.create_vm.outputs.output }}
         run: |
-          PAYLOAD=$(jq -n \
-            --arg content "❌ **OCI VM Creation Failed** (attempt at $(date -u '+%Y-%m-%d %H:%M UTC'))\n\`\`\`\n${{ steps.create_vm.outputs.output }}\n\`\`\`" \
-            '{content: $content}')
-          curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+          python3 -c "
+import json, os
+from datetime import datetime, timezone
+output = os.environ.get('OCI_OUTPUT', '')
+timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+content = '\u274c **OCI VM Creation Failed** (attempt at ' + timestamp + ')\n\`\`\`\n' + output + '\n\`\`\`'
+print(json.dumps({'content': content}))
+" | curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d @-
 
       - name: Fail the job if VM creation failed
         if: steps.create_vm.outputs.exit_code != '0'
