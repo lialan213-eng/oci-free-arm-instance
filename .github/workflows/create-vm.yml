@@ -66,41 +66,59 @@ jobs:
             --boot-volume-size-in-gbs 100 \
             2>&1)
           EXIT_CODE=$?
-          echo "output<<EOF" >> "$GITHUB_OUTPUT"
+          # Use a random delimiter to avoid collision if OCI output contains "EOF"
+          DELIM=$(openssl rand -hex 8)
+          echo "output<<${DELIM}" >> "$GITHUB_OUTPUT"
           echo "$OUTPUT" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
       - name: Notify Discord on success
         if: steps.create_vm.outputs.exit_code == '0'
+        continue-on-error: true  # Don't let Discord notification failure break the workflow
         env:
           OCI_OUTPUT: ${{ steps.create_vm.outputs.output }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python3 - <<'PY' | curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification"
+            exit 0
+          fi
+          python3 - <<'PY' | curl -sf -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d @-
           import json, os
           output = os.environ.get("OCI_OUTPUT", "")
+          if len(output) > 1800:
+              output = output[:1800] + "\n...(truncated)"
           content = "✅ **OCI VM Created Successfully!**\n```\n" + output + "\n```"
           print(json.dumps({"content": content}))
           PY
 
       - name: Notify Discord on failure
         if: steps.create_vm.outputs.exit_code != '0'
+        continue-on-error: true  # Don't let Discord notification failure break the workflow
         env:
           OCI_OUTPUT: ${{ steps.create_vm.outputs.output }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python3 - <<'PY' | curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification"
+            exit 0
+          fi
+          python3 - <<'PY' | curl -sf -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d @-
           import json, os
           from datetime import datetime, timezone
           output = os.environ.get("OCI_OUTPUT", "")
+          if len(output) > 1700:
+              output = output[:1700] + "\n...(truncated)"
           timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
           content = "❌ **OCI VM Creation Failed** (attempt at " + timestamp + ")\n```\n" + output + "\n```"
           print(json.dumps({"content": content}))
           PY
 
       - name: Fail the job if VM creation failed
-        if: steps.create_vm.outputs.exit_code != '0'
+        if: always() && steps.create_vm.outputs.exit_code != '0'
         run: exit 1
