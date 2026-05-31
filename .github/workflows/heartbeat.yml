@@ -19,14 +19,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python3 - <<'PY'
-          import json, os, urllib.request, urllib.error
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "DISCORD_WEBHOOK_URL not set — skipping notification"
+            exit 0
+          fi
+          python3 - <<'PY' | curl -sf -X POST "$DISCORD_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d @- \
+          && echo "Discord notified" || { echo "Discord webhook failed"; exit 1; }
+          import json, os, urllib.request
           from datetime import datetime, timezone, timedelta
 
-          token    = os.environ["GITHUB_TOKEN"]
-          webhook  = os.environ.get("DISCORD_WEBHOOK_URL", "")
-          repo     = "lialan213-eng/oci-free-arm-instance"
-          wf_id    = "283490734"   # create-vm workflow numeric ID
+          token   = os.environ["GITHUB_TOKEN"]
+          repo    = "lialan213-eng/oci-free-arm-instance"
+          wf_id   = "283490734"   # create-vm workflow numeric ID
 
           def gh_get(url):
               req = urllib.request.Request(url, headers={
@@ -37,7 +43,6 @@ jobs:
               with urllib.request.urlopen(req) as r:
                   return json.loads(r.read())
 
-          # Fetch up to 100 most-recent runs (enough for last ~24 h)
           data  = gh_get(f"https://api.github.com/repos/{repo}/actions/workflows/{wf_id}/runs?per_page=100")
           total = data["total_count"]
           runs  = data["workflow_runs"]
@@ -72,21 +77,5 @@ jobs:
               f"_调度器仍在运行中，继续等待资源释放…_"
           )
 
-          if not webhook:
-              print("DISCORD_WEBHOOK_URL not set — printing message instead:")
-              print(msg)
-              raise SystemExit(0)
-
-          payload = json.dumps({"content": msg}).encode()
-          req = urllib.request.Request(
-              webhook, data=payload,
-              headers={"Content-Type": "application/json"},
-              method="POST",
-          )
-          try:
-              with urllib.request.urlopen(req) as r:
-                  print(f"Discord notified (HTTP {r.status})")
-          except urllib.error.HTTPError as e:
-              print(f"Discord webhook failed: {e.code} {e.reason}")
-              raise SystemExit(1)
+          print(json.dumps({"content": msg}))
           PY
