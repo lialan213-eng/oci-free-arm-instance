@@ -201,7 +201,7 @@ jobs:
           from pathlib import Path
 
           body = Path("/tmp/oci-instances.json").read_text(encoding="utf-8", errors="replace")
-          payload = None
+          payload = [] if not body.strip() else None
           for offset, character in enumerate(body):
               if character not in "[{":
                   continue
