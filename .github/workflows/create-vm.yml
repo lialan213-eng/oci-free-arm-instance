@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: write
+    env:
+      SUPPRESS_LABEL_WARNING: "True"
 
     steps:
       - name: Cache OCI CLI
@@ -189,7 +191,18 @@ jobs:
           import os
           from pathlib import Path
 
-          payload = json.loads(Path("/tmp/oci-instances.json").read_text(encoding="utf-8"))
+          body = Path("/tmp/oci-instances.json").read_text(encoding="utf-8", errors="replace")
+          payload = None
+          for offset, character in enumerate(body):
+              if character != "{":
+                  continue
+              try:
+                  payload, _ = json.JSONDecoder().raw_decode(body[offset:])
+                  break
+              except json.JSONDecodeError:
+                  continue
+          if payload is None:
+              raise SystemExit("OCI instance list did not contain a JSON response")
           active = [
               instance
               for instance in payload.get("data", [])
