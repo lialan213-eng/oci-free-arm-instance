@@ -36,6 +36,7 @@ jobs:
       - name: Parse and validate bundled OCI configuration
         env:
           OCI_BUNDLE: ${{ secrets.OCI }}
+          OCI_KEY_OVERRIDE: ${{ secrets.OCI_CLI_KEY_CONTENT }}
         run: |
           python3 - <<'PY'
           import base64
@@ -90,6 +91,10 @@ jobs:
           missing = [name for name in expected if not values.get(name)]
           if missing:
               raise SystemExit("Missing OCI bundle fields: " + ", ".join(missing))
+
+          key_override = os.environ.get("OCI_KEY_OVERRIDE", "").strip()
+          if key_override:
+              values["OCI_CLI_KEY_CONTENT"] = key_override
 
           for name in expected:
               value = values[name]
