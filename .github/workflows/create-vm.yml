@@ -1,19 +1,22 @@
 name: Try to Create OCI VM
 
 on:
-  # Run every 10 minutes, but only between 11:00 AM and 2:00 AM Beijing time (CST, UTC+8).
-  # 11:00 AM CST = 03:00 UTC   |   2:00 AM CST (next day) = 18:00 UTC
   schedule:
-    - cron: '*/10 3-17 * * *'   # Every 10 min from 03:00–17:59 UTC (11:00 AM–1:59 AM CST)
-    - cron: '0 18 * * *'         # Once at 18:00 UTC (exactly 2:00 AM CST)
-  # Allow manual triggering from the Actions tab
+    # Avoid the start of the hour, when GitHub Actions cron traffic is highest.
+    - cron: '7-57/10 * * * *'
   workflow_dispatch:
+
+concurrency:
+  group: oci-vm-creation
+  cancel-in-progress: false
 
 jobs:
   create-instance:
     name: Attempt OCI VM Creation
     runs-on: ubuntu-latest
-    permissions: {}  # This job needs no GitHub token permissions
+    timeout-minutes: 10
+    permissions:
+      actions: write
 
     steps:
       - name: Cache OCI CLI
@@ -21,104 +24,295 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local
-          key: oci-cli-${{ runner.os }}-v1
+          key: oci-cli-${{ runner.os }}-v2
 
       - name: Install OCI CLI
         if: steps.cache-oci.outputs.cache-hit != 'true'
-        run: |
-          pip install --user oci-cli --quiet
+        run: python3 -m pip install --user oci-cli --quiet
 
-      - name: Ensure OCI CLI is on PATH
+      - name: Add OCI CLI to PATH
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Configure OCI CLI
+      - name: Parse and validate bundled OCI configuration
+        env:
+          OCI_BUNDLE: ${{ secrets.OCI }}
         run: |
-          mkdir -p ~/.oci
-          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
-          cat > ~/.oci/config <<EOF
-          [DEFAULT]
-          user=${{ secrets.OCI_CLI_USER }}
-          fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}
-          key_file=/home/runner/.oci/oci_api_key.pem
-          tenancy=${{ secrets.OCI_CLI_TENANCY }}
-          region=${{ secrets.OCI_CLI_REGION }}
-          EOF
-          chmod 600 ~/.oci/config
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import re
+          from pathlib import Path
 
-      - name: Write SSH public key
+          expected = (
+              "OCI_CLI_USER",
+              "OCI_CLI_FINGERPRINT",
+              "OCI_CLI_KEY_CONTENT",
+              "OCI_CLI_TENANCY",
+              "OCI_CLI_REGION",
+              "OCI_COMPARTMENT_ID",
+              "OCI_SUBNET_ID",
+              "AD_NAME",
+              "IMAGE_ID",
+              "SSH_PUBLIC_KEY",
+          )
+
+          bundle = os.environ.get("OCI_BUNDLE", "").replace("\r\n", "\n")
+          if not bundle.strip():
+              raise SystemExit("The OCI repository secret is empty")
+
+          key_pattern = "|".join(re.escape(name) for name in expected)
+          matches = list(re.finditer(
+              rf"(?m)^\s*(?:export\s+)?({key_pattern})\s*([=:])\s*",
+              bundle,
+          ))
+          values = {}
+
+          for index, match in enumerate(matches):
+              end = matches[index + 1].start() if index + 1 < len(matches) else len(bundle)
+              raw = bundle[match.end():end].strip()
+
+              if match.group(2) == ":" and re.match(r"^[|>][-+]?\s*(?:\n|$)", raw):
+                  raw = re.sub(r"^[|>][-+]?\s*", "", raw, count=1)
+                  raw = "\n".join(line.lstrip() for line in raw.splitlines())
+
+              if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+                  if raw[0] == '"':
+                      try:
+                          raw = json.loads(raw)
+                      except json.JSONDecodeError:
+                          raw = raw[1:-1]
+                  else:
+                      raw = raw[1:-1]
+
+              values[match.group(1)] = raw.strip()
+
+          missing = [name for name in expected if not values.get(name)]
+          if missing:
+              raise SystemExit("Missing OCI bundle fields: " + ", ".join(missing))
+
+          for name in expected:
+              value = values[name]
+              print(f"::add-mask::{value}")
+              for line in value.splitlines():
+                  if len(line.strip()) >= 4:
+                      print(f"::add-mask::{line.strip()}")
+
+          validations = {
+              "OCI_CLI_USER": r"^ocid1\.user\.",
+              "OCI_CLI_TENANCY": r"^ocid1\.tenancy\.",
+              "OCI_COMPARTMENT_ID": r"^ocid1\.(?:tenancy|compartment)\.",
+              "OCI_SUBNET_ID": r"^ocid1\.subnet\.",
+              "IMAGE_ID": r"^ocid1\.image\.",
+              "OCI_CLI_REGION": r"^[a-z]{2}-[a-z0-9-]+-\d$",
+              "AD_NAME": r"^[A-Za-z0-9]+:[A-Za-z0-9-]+-AD-\d$",
+              "OCI_CLI_FINGERPRINT": r"^(?:[0-9a-fA-F]{2}:){15}[0-9a-fA-F]{2}$",
+              "SSH_PUBLIC_KEY": r"^(?:ssh-rsa|ssh-ed25519)\s+",
+          }
+          invalid = [
+              name for name, pattern in validations.items()
+              if not re.search(pattern, values[name].strip())
+          ]
+          if invalid:
+              raise SystemExit("Invalid OCI bundle fields: " + ", ".join(invalid))
+
+          key_content = values["OCI_CLI_KEY_CONTENT"].replace("\\n", "\n").strip()
+          if not re.search(r"-----BEGIN [^-\r\n]*PRIVATE KEY-----", key_content):
+              try:
+                  decoded = base64.b64decode("".join(key_content.split()), validate=True)
+                  decoded_text = decoded.decode("utf-8")
+              except (ValueError, UnicodeDecodeError, base64.binascii.Error):
+                  decoded_text = ""
+              if re.search(r"-----BEGIN [^-\r\n]*PRIVATE KEY-----", decoded_text):
+                  key_content = decoded_text.strip()
+
+          if not re.search(r"-----BEGIN [^-\r\n]*PRIVATE KEY-----", key_content):
+              raise SystemExit("OCI_CLI_KEY_CONTENT is not a PEM private key")
+
+          oci_dir = Path.home() / ".oci"
+          oci_dir.mkdir(mode=0o700, exist_ok=True)
+          key_path = oci_dir / "oci_api_key.pem"
+          key_path.write_text(key_content + "\n", encoding="utf-8")
+          key_path.chmod(0o600)
+
+          config_path = oci_dir / "config"
+          config_path.write_text(
+              "[DEFAULT]\n"
+              f"user={values['OCI_CLI_USER']}\n"
+              f"fingerprint={values['OCI_CLI_FINGERPRINT']}\n"
+              f"key_file={key_path}\n"
+              f"tenancy={values['OCI_CLI_TENANCY']}\n"
+              f"region={values['OCI_CLI_REGION']}\n",
+              encoding="utf-8",
+          )
+          config_path.chmod(0o600)
+
+          ssh_path = Path("/tmp/oci_ssh_key.pub")
+          ssh_path.write_text(values["SSH_PUBLIC_KEY"].strip() + "\n", encoding="utf-8")
+          ssh_path.chmod(0o600)
+
+          github_env = Path(os.environ["GITHUB_ENV"])
+          with github_env.open("a", encoding="utf-8") as env_file:
+              for name in ("OCI_COMPARTMENT_ID", "OCI_SUBNET_ID", "AD_NAME", "IMAGE_ID"):
+                  env_file.write(f"{name}={values[name]}\n")
+
+          print("Bundled OCI configuration parsed and validated")
+          PY
+
+      - name: Validate private key
+        run: openssl pkey -in ~/.oci/oci_api_key.pem -check -noout
+
+      - name: Authenticate with OCI
         run: |
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh_key.pub
+          NAMESPACE=$(oci os ns get --query data --raw-output)
+          if [ -z "$NAMESPACE" ]; then
+            echo "OCI authentication returned an empty namespace"
+            exit 1
+          fi
+          echo "OCI authentication succeeded"
 
-      - name: Try to create VM instance
-        id: create_vm
+      - name: Check for an existing instance
+        id: existing
+        run: |
+          COUNT=$(oci compute instance list \
+            --compartment-id "$OCI_COMPARTMENT_ID" \
+            --all \
+            --query 'length(data[?"display-name" == `coolify-vm` && "lifecycle-state" != `TERMINATED`])' \
+            --raw-output)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" != "0" ]; then
+            echo "An active coolify-vm instance already exists"
+          fi
+
+      - name: Launch VM
+        id: launch
+        if: steps.existing.outputs.count == '0'
+        env:
+          SHAPE_CONFIG: '{"ocpus":1,"memoryInGBs":6}'
         run: |
           set +e
-          OUTPUT=$(oci compute instance launch \
-            --compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}" \
-            --availability-domain "${{ secrets.AD_NAME }}" \
+          oci compute instance launch \
+            --compartment-id "$OCI_COMPARTMENT_ID" \
+            --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
-            --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
-            --image-id "${{ secrets.IMAGE_ID }}" \
-            --ssh-authorized-keys-file /tmp/ssh_key.pub \
+            --shape-config "$SHAPE_CONFIG" \
+            --subnet-id "$OCI_SUBNET_ID" \
+            --image-id "$IMAGE_ID" \
+            --ssh-authorized-keys-file /tmp/oci_ssh_key.pub \
+            --assign-public-ip true \
             --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 100 \
-            2>&1)
+            --boot-volume-size-in-gbs 50 \
+            > /tmp/oci-launch-response.log 2>&1
           EXIT_CODE=$?
-          # Use a random delimiter to avoid collision if OCI output contains "EOF"
-          DELIM=$(openssl rand -hex 8)
-          echo "output<<${DELIM}" >> "$GITHUB_OUTPUT"
-          echo "$OUTPUT" >> "$GITHUB_OUTPUT"
-          echo "${DELIM}" >> "$GITHUB_OUTPUT"
-          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          set -e
 
-      - name: Notify Discord on success
-        if: steps.create_vm.outputs.exit_code == '0'
-        continue-on-error: true  # Don't let Discord notification failure break the workflow
+          EXIT_CODE="$EXIT_CODE" python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          body = Path("/tmp/oci-launch-response.log").read_text(encoding="utf-8", errors="replace")
+          exit_code = int(os.environ["EXIT_CODE"])
+          parsed = {}
+
+          for offset, character in enumerate(body):
+              if character != "{":
+                  continue
+              try:
+                  parsed, _ = json.JSONDecoder().raw_decode(body[offset:])
+                  break
+              except json.JSONDecodeError:
+                  continue
+
+          if exit_code == 0:
+              instance = parsed.get("data", parsed)
+              instance_id = instance.get("id", "")
+              if instance_id:
+                  print(f"::add-mask::{instance_id}")
+              result = "created"
+              code = "OK"
+              status = 200
+              message = "OCI accepted the VM launch request"
+              request_id = parsed.get("opc-request-id", "not-returned")
+          else:
+              code = parsed.get("code", "UnclassifiedError")
+              status = parsed.get("status", "unknown")
+              message = parsed.get("message", "OCI CLI failed without a structured service response")
+              request_id = parsed.get("opc-request-id", "not-returned")
+              normalized = f"{code} {message}".lower()
+              result = "capacity" if "out of host capacity" in normalized else "fatal"
+
+          summary = (
+              f"OCI launch response: result={result} code={code} "
+              f"status={status} request_id={request_id} message={message}"
+          )
+          print(summary)
+
+          output_path = Path(os.environ["GITHUB_OUTPUT"])
+          with output_path.open("a", encoding="utf-8") as output:
+              output.write(f"result={result}\n")
+              output.write(f"code={code}\n")
+              output.write(f"status={status}\n")
+              output.write(f"request_id={request_id}\n")
+
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as report:
+              report.write("## OCI VM launch result\n\n")
+              report.write(summary + "\n")
+
+          if result == "fatal":
+              sys.exit(2)
+          PY
+
+      - name: Record existing instance as success
+        id: existing-result
+        if: steps.existing.outputs.count != '0'
+        run: |
+          echo "result=existing" >> "$GITHUB_OUTPUT"
+          echo "Existing coolify-vm instance found; no launch request was sent." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Discord
+        if: always()
+        continue-on-error: true
         env:
-          OCI_OUTPUT: ${{ steps.create_vm.outputs.output }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          LAUNCH_RESULT: ${{ steps.launch.outputs.result }}
+          ERROR_CODE: ${{ steps.launch.outputs.code }}
+          REQUEST_ID: ${{ steps.launch.outputs.request_id }}
+          EXISTING_RESULT: ${{ steps.existing-result.outputs.result }}
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
-            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification"
             exit 0
           fi
+
           python3 - <<'PY' | curl -sf -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d @-
-          import json, os
-          output = os.environ.get("OCI_OUTPUT", "")
-          if len(output) > 1800:
-              output = output[:1800] + "\n...(truncated)"
-          content = "✅ **OCI VM Created Successfully!**\n```\n" + output + "\n```"
+          import json
+          import os
+
+          result = os.environ.get("LAUNCH_RESULT") or os.environ.get("EXISTING_RESULT") or "setup-failed"
+          code = os.environ.get("ERROR_CODE") or "N/A"
+          request_id = os.environ.get("REQUEST_ID") or "N/A"
+
+          if result == "created":
+              content = "**OCI VM created successfully.** The creation workflow will stop automatically."
+          elif result == "existing":
+              content = "**OCI VM already exists.** No duplicate launch was attempted."
+          elif result == "capacity":
+              content = f"OCI capacity unavailable. Real launch request confirmed. Code: \`{code}\`, request: \`{request_id}\`."
+          else:
+              content = f"OCI workflow requires attention. Result: \`{result}\`, code: \`{code}\`."
+
           print(json.dumps({"content": content}))
           PY
 
-      - name: Notify Discord on failure
-        if: steps.create_vm.outputs.exit_code != '0'
-        continue-on-error: true  # Don't let Discord notification failure break the workflow
+      - name: Disable creation workflow after success
+        if: steps.launch.outputs.result == 'created' || steps.existing-result.outputs.result == 'existing'
         env:
-          OCI_OUTPUT: ${{ steps.create_vm.outputs.output }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
-            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification"
-            exit 0
-          fi
-          python3 - <<'PY' | curl -sf -X POST "$DISCORD_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d @-
-          import json, os
-          from datetime import datetime, timezone
-          output = os.environ.get("OCI_OUTPUT", "")
-          if len(output) > 1700:
-              output = output[:1700] + "\n...(truncated)"
-          timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-          content = "❌ **OCI VM Creation Failed** (attempt at " + timestamp + ")\n```\n" + output + "\n```"
-          print(json.dumps({"content": content}))
-          PY
-
-      - name: Fail the job if VM creation failed
-        if: always() && steps.create_vm.outputs.exit_code != '0'
-        run: exit 1
+          gh api \
+            --method PUT \
+            "repos/${{ github.repository }}/actions/workflows/create-vm.yml/disable"
+          echo "Creation workflow disabled after success"
