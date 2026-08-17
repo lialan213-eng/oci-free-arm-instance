@@ -2,9 +2,8 @@ name: Try to Create OCI VM
 
 on:
   schedule:
-    # Every 10 minutes from 11:00 AM to 1:59 AM Beijing time, then once at 2:00 AM.
-    - cron: '*/10 3-17 * * *'
-    - cron: '0 18 * * *'
+    # Run around the clock, offset from the top of the hour to reduce scheduler delays.
+    - cron: '7-57/10 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -16,7 +15,8 @@ jobs:
     name: Attempt OCI VM Creation
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions: {}
+    permissions:
+      actions: write
     env:
       SUPPRESS_LABEL_WARNING: "True"
 
@@ -362,6 +362,16 @@ jobs:
 
           print(json.dumps({"content": content}))
           PY
+
+      - name: Disable creation workflow after success
+        if: steps.launch.outputs.result == 'created' || steps.existing-result.outputs.result == 'existing'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api \
+            --method PUT \
+            "repos/${{ github.repository }}/actions/workflows/create-vm.yml/disable"
+          echo "Creation workflow disabled after success"
 
       - name: Mark capacity miss
         if: steps.launch.outputs.result == 'capacity'
