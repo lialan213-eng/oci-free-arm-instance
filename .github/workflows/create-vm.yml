@@ -181,10 +181,19 @@ jobs:
       - name: Check for an existing instance
         id: existing
         run: |
+          set +e
           oci compute instance list \
             --compartment-id "$OCI_COMPARTMENT_ID" \
             --all \
-            > /tmp/oci-instances.json
+            --output json \
+            > /tmp/oci-instances.json 2> /tmp/oci-instances.stderr
+          LIST_EXIT=$?
+          set -e
+          echo "OCI instance list diagnostics: exit=$LIST_EXIT stdout_bytes=$(wc -c < /tmp/oci-instances.json) stderr_bytes=$(wc -c < /tmp/oci-instances.stderr)"
+          if [ "$LIST_EXIT" != "0" ]; then
+            echo "OCI instance list request failed"
+            exit "$LIST_EXIT"
+          fi
 
           python3 - <<'PY'
           import json
@@ -194,18 +203,21 @@ jobs:
           body = Path("/tmp/oci-instances.json").read_text(encoding="utf-8", errors="replace")
           payload = None
           for offset, character in enumerate(body):
-              if character != "{":
+              if character not in "[{":
                   continue
               try:
                   payload, _ = json.JSONDecoder().raw_decode(body[offset:])
                   break
               except json.JSONDecodeError:
                   continue
+          if payload is None and body.strip() == "null":
+              payload = []
           if payload is None:
-              raise SystemExit("OCI instance list did not contain a JSON response")
+              raise SystemExit("OCI instance list did not contain an object or array response")
+          instances = payload.get("data", []) if isinstance(payload, dict) else payload
           active = [
               instance
-              for instance in payload.get("data", [])
+              for instance in instances
               if instance.get("display-name") == "coolify-vm"
               and instance.get("lifecycle-state") != "TERMINATED"
           ]
