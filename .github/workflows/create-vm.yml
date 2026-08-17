@@ -327,42 +327,6 @@ jobs:
           echo "result=existing" >> "$GITHUB_OUTPUT"
           echo "Existing coolify-vm instance found; no launch request was sent." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Notify Discord
-        if: always()
-        continue-on-error: true
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          LAUNCH_RESULT: ${{ steps.launch.outputs.result }}
-          ERROR_CODE: ${{ steps.launch.outputs.code }}
-          REQUEST_ID: ${{ steps.launch.outputs.request_id }}
-          EXISTING_RESULT: ${{ steps.existing-result.outputs.result }}
-        run: |
-          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
-            exit 0
-          fi
-
-          python3 - <<'PY' | curl -sf -X POST "$DISCORD_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d @-
-          import json
-          import os
-
-          result = os.environ.get("LAUNCH_RESULT") or os.environ.get("EXISTING_RESULT") or "setup-failed"
-          code = os.environ.get("ERROR_CODE") or "N/A"
-          request_id = os.environ.get("REQUEST_ID") or "N/A"
-
-          if result == "created":
-              content = "**OCI VM created successfully.** The creation workflow will stop automatically."
-          elif result == "existing":
-              content = "**OCI VM already exists.** No duplicate launch was attempted."
-          elif result == "capacity":
-              content = f"OCI capacity unavailable. Real launch request confirmed. Code: `{code}`, request: `{request_id}`."
-          else:
-              content = f"OCI workflow requires attention. Result: `{result}`, code: `{code}`."
-
-          print(json.dumps({"content": content}))
-          PY
-
       - name: Disable creation workflow after success
         if: steps.launch.outputs.result == 'created' || steps.existing-result.outputs.result == 'existing'
         env:
