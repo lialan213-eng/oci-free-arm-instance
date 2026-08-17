@@ -179,19 +179,42 @@ jobs:
       - name: Check for an existing instance
         id: existing
         run: |
-          COUNT=$(oci compute instance list \
+          oci compute instance list \
             --compartment-id "$OCI_COMPARTMENT_ID" \
             --all \
-            --query 'length(data[?"display-name" == `coolify-vm` && "lifecycle-state" != `TERMINATED`])' \
-            --raw-output)
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-          if [ "$COUNT" != "0" ]; then
-            echo "An active coolify-vm instance already exists"
-            oci compute instance list \
-              --compartment-id "$OCI_COMPARTMENT_ID" \
-              --all \
-              --query 'data[?"display-name" == `coolify-vm` && "lifecycle-state" != `TERMINATED`].{state:"lifecycle-state",shape:shape,ocpus:"shape-config".ocpus,memory_gb:"shape-config"."memory-in-gbs",created:"time-created",availability_domain:"availability-domain"}'
-          fi
+            > /tmp/oci-instances.json
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/oci-instances.json").read_text(encoding="utf-8"))
+          active = [
+              instance
+              for instance in payload.get("data", [])
+              if instance.get("display-name") == "coolify-vm"
+              and instance.get("lifecycle-state") != "TERMINATED"
+          ]
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"count={len(active)}\n")
+
+          if active:
+              details = [
+                  {
+                      "state": instance.get("lifecycle-state"),
+                      "shape": instance.get("shape"),
+                      "ocpus": (instance.get("shape-config") or {}).get("ocpus"),
+                      "memory_gb": (instance.get("shape-config") or {}).get("memory-in-gbs"),
+                      "created": instance.get("time-created"),
+                  }
+                  for instance in active
+              ]
+              print("Existing coolify-vm instances: " + json.dumps(details))
+          else:
+              print("No active coolify-vm instance exists")
+          PY
 
       - name: Launch VM
         id: launch
