@@ -190,7 +190,7 @@ jobs:
             oci compute instance list \
               --compartment-id "$OCI_COMPARTMENT_ID" \
               --all \
-              --query 'data[?"display-name" == `coolify-vm` && "lifecycle-state" != `TERMINATED`] | [0].{state:"lifecycle-state",shape:shape,ocpus:"shape-config".ocpus,memory_gb:"shape-config"."memory-in-gbs",created:"time-created",availability_domain:"availability-domain"}'
+              --query 'data[?"display-name" == `coolify-vm` && "lifecycle-state" != `TERMINATED`].{state:"lifecycle-state",shape:shape,ocpus:"shape-config".ocpus,memory_gb:"shape-config"."memory-in-gbs",created:"time-created",availability_domain:"availability-domain"}'
           fi
 
       - name: Launch VM
@@ -309,9 +309,9 @@ jobs:
           elif result == "existing":
               content = "**OCI VM already exists.** No duplicate launch was attempted."
           elif result == "capacity":
-              content = f"OCI capacity unavailable. Real launch request confirmed. Code: \`{code}\`, request: \`{request_id}\`."
+              content = f"OCI capacity unavailable. Real launch request confirmed. Code: `{code}`, request: `{request_id}`."
           else:
-              content = f"OCI workflow requires attention. Result: \`{result}\`, code: \`{code}\`."
+              content = f"OCI workflow requires attention. Result: `{result}`, code: `{code}`."
 
           print(json.dumps({"content": content}))
           PY
