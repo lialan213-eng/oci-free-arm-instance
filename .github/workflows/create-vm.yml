@@ -373,3 +373,9 @@ jobs:
             --method PUT \
             "repos/${{ github.repository }}/actions/workflows/create-vm.yml/disable"
           echo "Creation workflow disabled after success"
+
+      - name: Mark capacity miss
+        if: steps.launch.outputs.result == 'capacity'
+        run: |
+          echo "OCI accepted the launch request but reported no host capacity"
+          exit 1
