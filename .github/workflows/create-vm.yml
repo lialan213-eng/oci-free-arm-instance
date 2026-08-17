@@ -187,6 +187,10 @@ jobs:
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           if [ "$COUNT" != "0" ]; then
             echo "An active coolify-vm instance already exists"
+            oci compute instance list \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --all \
+              --query 'data[?"display-name" == `coolify-vm` && "lifecycle-state" != `TERMINATED`] | [0].{state:"lifecycle-state",shape:shape,ocpus:"shape-config".ocpus,memory_gb:"shape-config"."memory-in-gbs",created:"time-created",availability_domain:"availability-domain"}'
           fi
 
       - name: Launch VM
