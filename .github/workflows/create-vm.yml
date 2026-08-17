@@ -2,8 +2,9 @@ name: Try to Create OCI VM
 
 on:
   schedule:
-    # Avoid the start of the hour, when GitHub Actions cron traffic is highest.
-    - cron: '7-57/10 * * * *'
+    # Every 10 minutes from 11:00 AM to 1:59 AM Beijing time, then once at 2:00 AM.
+    - cron: '*/10 3-17 * * *'
+    - cron: '0 18 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -15,8 +16,7 @@ jobs:
     name: Attempt OCI VM Creation
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      actions: write
+    permissions: {}
     env:
       SUPPRESS_LABEL_WARNING: "True"
 
@@ -245,7 +245,7 @@ jobs:
         id: launch
         if: steps.existing.outputs.count == '0'
         env:
-          SHAPE_CONFIG: '{"ocpus":1,"memoryInGBs":6}'
+          SHAPE_CONFIG: '{"ocpus":4,"memoryInGBs":24}'
         run: |
           set +e
           oci compute instance launch \
@@ -256,9 +256,8 @@ jobs:
             --subnet-id "$OCI_SUBNET_ID" \
             --image-id "$IMAGE_ID" \
             --ssh-authorized-keys-file /tmp/oci_ssh_key.pub \
-            --assign-public-ip true \
             --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 50 \
+            --boot-volume-size-in-gbs 100 \
             > /tmp/oci-launch-response.log 2>&1
           EXIT_CODE=$?
           set -e
@@ -363,16 +362,6 @@ jobs:
 
           print(json.dumps({"content": content}))
           PY
-
-      - name: Disable creation workflow after success
-        if: steps.launch.outputs.result == 'created' || steps.existing-result.outputs.result == 'existing'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api \
-            --method PUT \
-            "repos/${{ github.repository }}/actions/workflows/create-vm.yml/disable"
-          echo "Creation workflow disabled after success"
 
       - name: Mark capacity miss
         if: steps.launch.outputs.result == 'capacity'
