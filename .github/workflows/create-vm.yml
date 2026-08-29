@@ -245,7 +245,7 @@ jobs:
         id: launch
         if: steps.existing.outputs.count == '0'
         env:
-          SHAPE_CONFIG: '{"ocpus":4,"memoryInGBs":24}'
+          SHAPE_CONFIG: '{"ocpus":2,"memoryInGBs":12}'
         run: |
           set +e
           oci compute instance launch \
